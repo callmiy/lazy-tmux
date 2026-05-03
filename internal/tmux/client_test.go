@@ -1,8 +1,27 @@
 package tmux
 
 import (
+	"fmt"
 	"testing"
+
+	"github.com/alchemmist/lazy-tmux/internal/snapshot"
 )
+
+type fakeRunner struct {
+	commands []string
+	outputs  map[string]commandResult
+}
+
+func (r *fakeRunner) runCommand(args ...string) commandResult {
+	key := fmt.Sprint(args)
+	r.commands = append(r.commands, key)
+
+	if out, ok := r.outputs[key]; ok {
+		return out
+	}
+
+	return commandResult{err: fmt.Errorf("unexpected command: %s", key)}
+}
 
 func TestSplitLines(t *testing.T) {
 	got := splitLines("  one \n\n two\n\t\nthree  \n")
@@ -268,6 +287,182 @@ func TestSessionWindowTarget(t *testing.T) {
 				testCase.want,
 			)
 		}
+	}
+}
+
+func TestCaptureSessionUsesActiveWindowAndPaneIndices(t *testing.T) {
+	runner := &fakeRunner{
+		outputs: map[string]commandResult{
+			fmt.Sprint([]string{"tmux", "has-session", "-t", "=demo"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "list-windows", "-t", "=demo", "-F",
+				"#{window_index}" + fieldSep + "#{window_name}" + fieldSep + "#{window_layout}" + fieldSep + "#{window_active}",
+			}): {
+				stdout: "1" + fieldSep + "editor" + fieldSep + "layout-1" + fieldSep + "0\n" +
+					"2" + fieldSep + "logs" + fieldSep + "layout-2" + fieldSep + "1\n",
+			},
+			fmt.Sprint([]string{"tmux", "list-panes", "-t", "=demo:1", "-F",
+				"#{pane_index}" + fieldSep +
+					"#{pane_current_path}" + fieldSep +
+					"#{pane_current_command}" + fieldSep +
+					"#{pane_active}" + fieldSep +
+					"#{pane_pid}" + fieldSep +
+					"#{pane_tty}",
+			}): {
+				stdout: "1" + fieldSep + "/tmp/a" + fieldSep + "bash" + fieldSep + "1" + fieldSep + "1001" + fieldSep + "/dev/pts/1\n",
+			},
+			fmt.Sprint([]string{"tmux", "list-panes", "-t", "=demo:2", "-F",
+				"#{pane_index}" + fieldSep +
+					"#{pane_current_path}" + fieldSep +
+					"#{pane_current_command}" + fieldSep +
+					"#{pane_active}" + fieldSep +
+					"#{pane_pid}" + fieldSep +
+					"#{pane_tty}",
+			}): {
+				stdout: "1" + fieldSep + "/tmp/b" + fieldSep + "bash" + fieldSep + "0" + fieldSep + "1002" + fieldSep + "/dev/pts/2\n" +
+					"2" + fieldSep + "/tmp/b" + fieldSep + "nvim" + fieldSep + "1" + fieldSep + "1003" + fieldSep + "/dev/pts/3\n",
+			},
+		},
+	}
+	client := NewClientWithRunner("tmux", runner)
+
+	snap, err := client.CaptureSession("demo")
+	if err != nil {
+		t.Fatalf("CaptureSession returned error: %v", err)
+	}
+
+	if snap.CurrentWin != 2 {
+		t.Fatalf("expected CurrentWin=2, got %d", snap.CurrentWin)
+	}
+
+	if snap.CurrentPane != 2 {
+		t.Fatalf("expected CurrentPane=2, got %d", snap.CurrentPane)
+	}
+}
+
+func TestCaptureSessionFallsBackToFirstWindowAndPane(t *testing.T) {
+	runner := &fakeRunner{
+		outputs: map[string]commandResult{
+			fmt.Sprint([]string{"tmux", "has-session", "-t", "=demo"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "list-windows", "-t", "=demo", "-F",
+				"#{window_index}" + fieldSep + "#{window_name}" + fieldSep + "#{window_layout}" + fieldSep + "#{window_active}",
+			}): {
+				stdout: "3" + fieldSep + "third" + fieldSep + "layout-3" + fieldSep + "0\n" +
+					"5" + fieldSep + "fifth" + fieldSep + "layout-5" + fieldSep + "0\n",
+			},
+			fmt.Sprint([]string{"tmux", "list-panes", "-t", "=demo:3", "-F",
+				"#{pane_index}" + fieldSep +
+					"#{pane_current_path}" + fieldSep +
+					"#{pane_current_command}" + fieldSep +
+					"#{pane_active}" + fieldSep +
+					"#{pane_pid}" + fieldSep +
+					"#{pane_tty}",
+			}): {
+				stdout: "4" + fieldSep + "/tmp/c" + fieldSep + "bash" + fieldSep + "0" + fieldSep + "1004" + fieldSep + "/dev/pts/4\n" +
+					"6" + fieldSep + "/tmp/c" + fieldSep + "bash" + fieldSep + "0" + fieldSep + "1005" + fieldSep + "/dev/pts/5\n",
+			},
+			fmt.Sprint([]string{"tmux", "list-panes", "-t", "=demo:5", "-F",
+				"#{pane_index}" + fieldSep +
+					"#{pane_current_path}" + fieldSep +
+					"#{pane_current_command}" + fieldSep +
+					"#{pane_active}" + fieldSep +
+					"#{pane_pid}" + fieldSep +
+					"#{pane_tty}",
+			}): {
+				stdout: "7" + fieldSep + "/tmp/d" + fieldSep + "bash" + fieldSep + "0" + fieldSep + "1006" + fieldSep + "/dev/pts/6\n",
+			},
+		},
+	}
+	client := NewClientWithRunner("tmux", runner)
+
+	snap, err := client.CaptureSession("demo")
+	if err != nil {
+		t.Fatalf("CaptureSession returned error: %v", err)
+	}
+
+	if snap.CurrentWin != 3 {
+		t.Fatalf("expected CurrentWin=3 fallback, got %d", snap.CurrentWin)
+	}
+
+	if snap.CurrentPane != 4 {
+		t.Fatalf("expected CurrentPane=4 fallback, got %d", snap.CurrentPane)
+	}
+}
+
+func TestRestoreSessionCreatesExtraPanesInDescendingIndexOrder(t *testing.T) {
+	runner := &fakeRunner{
+		outputs: map[string]commandResult{
+			fmt.Sprint([]string{"tmux", "has-session", "-t", "=demo"}): {
+				err: fmt.Errorf("missing"),
+			},
+			fmt.Sprint([]string{"tmux", "new-session", "-d", "-s", "demo", "-n", "ex", "-c", "/tmp/root"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "list-windows", "-t", "=demo", "-F", "#{window_index}"}): {
+				stdout: "1\n",
+			},
+			fmt.Sprint([]string{"tmux", "split-window", "-d", "-t", "=demo:1", "-c", "/tmp/frontend"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "split-window", "-d", "-t", "=demo:1", "-c", "/tmp/backend"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "select-layout", "-t", "=demo:1", "layout-1"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "select-window", "-t", "=demo:1"}): {
+				stdout: "",
+			},
+			fmt.Sprint([]string{"tmux", "select-pane", "-t", "=demo:1.1"}): {
+				stdout: "",
+			},
+		},
+	}
+	client := NewClientWithRunner("tmux", runner)
+
+	err := client.RestoreSession(snapshot.SessionSnapshot{
+		SessionName: "demo",
+		CurrentWin:  1,
+		CurrentPane: 1,
+		Windows: []snapshot.Window{
+			{
+				Index:  1,
+				Name:   "ex",
+				Layout: "layout-1",
+				Panes: []snapshot.Pane{
+					{Index: 1, CurrentPath: "/tmp/root", CurrentCmd: "bash", IsActive: true},
+					{Index: 2, CurrentPath: "/tmp/backend", CurrentCmd: "bash"},
+					{Index: 3, CurrentPath: "/tmp/frontend", CurrentCmd: "bash"},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RestoreSession returned error: %v", err)
+	}
+
+	wantFrontend := fmt.Sprint([]string{"tmux", "split-window", "-d", "-t", "=demo:1", "-c", "/tmp/frontend"})
+	wantBackend := fmt.Sprint([]string{"tmux", "split-window", "-d", "-t", "=demo:1", "-c", "/tmp/backend"})
+	gotFrontend := -1
+	gotBackend := -1
+	for i, cmd := range runner.commands {
+		if cmd == wantFrontend {
+			gotFrontend = i
+		}
+		if cmd == wantBackend {
+			gotBackend = i
+		}
+	}
+
+	if gotFrontend == -1 || gotBackend == -1 {
+		t.Fatalf("expected split-window commands, got %#v", runner.commands)
+	}
+
+	if gotFrontend > gotBackend {
+		t.Fatalf("expected higher pane index to be created first, got commands %#v", runner.commands)
 	}
 }
 

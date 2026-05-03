@@ -221,28 +221,6 @@ func (client *Client) CaptureSession(name string) (snapshot.SessionSnapshot, err
 		return snapshot.SessionSnapshot{}, ErrSessionNotFound
 	}
 
-	metaOut, err := client.Output(
-		"display-message",
-		"-p",
-		"-t",
-		sessionTarget(name),
-		"#{window_index}"+fieldSep+"#{pane_index}",
-	)
-	if err != nil {
-		return snapshot.SessionSnapshot{}, err
-	}
-
-	meta := strings.Split(strings.TrimSpace(metaOut), fieldSep)
-	if len(meta) != 2 {
-		return snapshot.SessionSnapshot{}, fmt.Errorf(
-			"unexpected session meta format: %q",
-			strings.TrimSpace(metaOut),
-		)
-	}
-
-	currentWin, _ := strconv.Atoi(meta[0])
-	currentPane, _ := strconv.Atoi(meta[1])
-
 	wOut, err := client.Output(
 		"list-windows",
 		"-t",
@@ -316,6 +294,8 @@ func (client *Client) CaptureSession(name string) (snapshot.SessionSnapshot, err
 
 	sort.Slice(windows, func(i, j int) bool { return windows[i].Index < windows[j].Index })
 
+	currentWin, currentPane := activeWindowAndPane(windows)
+
 	return snapshot.SessionSnapshot{
 		Version:     snapshot.FormatVersion,
 		SessionName: name,
@@ -324,6 +304,27 @@ func (client *Client) CaptureSession(name string) (snapshot.SessionSnapshot, err
 		CurrentPane: currentPane,
 		Windows:     windows,
 	}, nil
+}
+
+func activeWindowAndPane(windows []snapshot.Window) (int, int) {
+	if len(windows) == 0 {
+		return 0, 0
+	}
+
+	currentWindow := windows[0]
+	for _, window := range windows {
+		if window.IsActive {
+			currentWindow = window
+			break
+		}
+	}
+
+	currentPane := currentWindow.ActivePane
+	if currentPane == 0 && len(currentWindow.Panes) > 0 {
+		currentPane = currentWindow.Panes[0].Index
+	}
+
+	return currentWindow.Index, currentPane
 }
 
 func (client *Client) RestoreSession(sessionSnapshot snapshot.SessionSnapshot) error {
@@ -490,8 +491,16 @@ func (client *Client) ensurePaneCount(
 		return nil
 	}
 
-	for i := 1; i < len(window.Panes); i++ {
-		pane := window.Panes[i]
+	panes := make([]snapshot.Pane, len(window.Panes))
+	copy(panes, window.Panes)
+	sort.Slice(panes, func(i, j int) bool { return panes[i].Index > panes[j].Index })
+	firstPaneIndex := panes[len(panes)-1].Index
+
+	for _, pane := range panes {
+		if pane.Index == firstPaneIndex {
+			continue
+		}
+
 		args := []string{"split-window", "-d", "-t", sessionWindowTarget(sessionName, windowIndex)}
 
 		if pane.CurrentPath != "" {
