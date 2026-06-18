@@ -17,6 +17,7 @@ import (
 type tmuxSessionManager interface {
 	ListSessions() ([]string, error)
 	CurrentSession() (string, error)
+	PreviousSession() (string, error)
 	SessionExists(name string) bool
 	SocketPath() string
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,6 +10,76 @@ import (
 	"github.com/alchemmist/lazy-tmux/internal/config"
 	"github.com/alchemmist/lazy-tmux/internal/snapshot"
 )
+
+type pickerTestTmux struct {
+	liveSessions       []string
+	previousSession    string
+	previousSessionErr error
+}
+
+func (t pickerTestTmux) ListSessions() ([]string, error) {
+	return t.liveSessions, nil
+}
+
+func (t pickerTestTmux) CurrentSession() (string, error) {
+	return "", nil
+}
+
+func (t pickerTestTmux) PreviousSession() (string, error) {
+	if t.previousSessionErr != nil {
+		return "", t.previousSessionErr
+	}
+
+	return t.previousSession, nil
+}
+
+func (t pickerTestTmux) SessionExists(string) bool {
+	return false
+}
+
+func (t pickerTestTmux) SocketPath() string {
+	return "test"
+}
+
+func (t pickerTestTmux) CaptureSession(string) (snapshot.SessionSnapshot, error) {
+	return snapshot.SessionSnapshot{}, nil
+}
+
+func (t pickerTestTmux) CapturePaneScrollback(string, int) (string, error) {
+	return "", nil
+}
+
+func (t pickerTestTmux) RestoreSession(snapshot.SessionSnapshot) error {
+	return nil
+}
+
+func (t pickerTestTmux) SwitchClient(string) error {
+	return nil
+}
+
+func (t pickerTestTmux) NewSession(string) error {
+	return nil
+}
+
+func (t pickerTestTmux) NewWindow(string, string) error {
+	return nil
+}
+
+func (t pickerTestTmux) KillWindow(string, int) error {
+	return nil
+}
+
+func (t pickerTestTmux) KillSession(string) error {
+	return nil
+}
+
+func (t pickerTestTmux) RenameWindow(string, int, string) error {
+	return nil
+}
+
+func (t pickerTestTmux) RenameSession(string, string) error {
+	return nil
+}
 
 func TestPickerRecordsEmpty(t *testing.T) {
 	app := New(config.Config{DataDir: t.TempDir(), TmuxBin: "tmux"})
@@ -117,5 +188,91 @@ func TestPickerRecordsSortedByLastAccessed(t *testing.T) {
 
 	if recs[0].SessionName != "alpha" || recs[1].SessionName != "beta" {
 		t.Fatalf("unexpected order by last_accessed: %#v", recs)
+	}
+}
+
+func TestPickerRecordsPromotesPreviousSession(t *testing.T) {
+	app := NewWithTmux(
+		config.Config{DataDir: t.TempDir(), TmuxBin: "tmux"},
+		pickerTestTmux{previousSession: "beta"},
+	)
+	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+
+	for _, snap := range []snapshot.SessionSnapshot{
+		{
+			Version:     snapshot.FormatVersion,
+			SessionName: "alpha",
+			CapturedAt:  base.Add(2 * time.Hour),
+			Windows:     []snapshot.Window{{Index: 0, Panes: []snapshot.Pane{{Index: 0}}}},
+		},
+		{
+			Version:     snapshot.FormatVersion,
+			SessionName: "beta",
+			CapturedAt:  base,
+			Windows:     []snapshot.Window{{Index: 0, Panes: []snapshot.Pane{{Index: 0}}}},
+		},
+		{
+			Version:     snapshot.FormatVersion,
+			SessionName: "gamma",
+			CapturedAt:  base.Add(time.Hour),
+			Windows:     []snapshot.Window{{Index: 0, Panes: []snapshot.Pane{{Index: 0}}}},
+		},
+	} {
+		err := app.store.SaveSession(snap)
+		if err != nil {
+			t.Fatalf("save session %q: %v", snap.SessionName, err)
+		}
+	}
+
+	recs, err := app.pickerRecords(DefaultPickerSortOptions())
+	if err != nil {
+		t.Fatalf("pickerRecords: %v", err)
+	}
+
+	got := []string{recs[0].SessionName, recs[1].SessionName, recs[2].SessionName}
+	want := []string{"beta", "alpha", "gamma"}
+
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("unexpected promoted order: got %v want %v", got, want)
+	}
+}
+
+func TestPickerRecordsKeepsSortedOrderWhenPreviousSessionUnavailable(t *testing.T) {
+	app := NewWithTmux(
+		config.Config{DataDir: t.TempDir(), TmuxBin: "tmux"},
+		pickerTestTmux{previousSessionErr: errors.New("no client")},
+	)
+	base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+
+	for _, snap := range []snapshot.SessionSnapshot{
+		{
+			Version:     snapshot.FormatVersion,
+			SessionName: "alpha",
+			CapturedAt:  base.Add(time.Hour),
+			Windows:     []snapshot.Window{{Index: 0, Panes: []snapshot.Pane{{Index: 0}}}},
+		},
+		{
+			Version:     snapshot.FormatVersion,
+			SessionName: "beta",
+			CapturedAt:  base,
+			Windows:     []snapshot.Window{{Index: 0, Panes: []snapshot.Pane{{Index: 0}}}},
+		},
+	} {
+		err := app.store.SaveSession(snap)
+		if err != nil {
+			t.Fatalf("save session %q: %v", snap.SessionName, err)
+		}
+	}
+
+	recs, err := app.pickerRecords(DefaultPickerSortOptions())
+	if err != nil {
+		t.Fatalf("pickerRecords: %v", err)
+	}
+
+	got := []string{recs[0].SessionName, recs[1].SessionName}
+	want := []string{"alpha", "beta"}
+
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("unexpected fallback order: got %v want %v", got, want)
 	}
 }

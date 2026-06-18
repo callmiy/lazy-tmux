@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/alchemmist/lazy-tmux/internal/picker"
 	"github.com/alchemmist/lazy-tmux/internal/snapshot"
@@ -22,6 +23,7 @@ func (a *App) pickerRecords(opts PickerSortOptions) ([]snapshot.Record, error) {
 	}
 
 	picker.SortSessionRecords(records, opts.Session)
+	a.promotePreviousRecord(records)
 
 	return records, nil
 }
@@ -60,6 +62,34 @@ func (a *App) pickerSessions(opts PickerSortOptions) ([]picker.Session, error) {
 	}
 
 	return sessions, nil
+}
+
+func (a *App) promotePreviousRecord(records []snapshot.Record) {
+	previous, err := a.tmux.PreviousSession()
+	if err != nil {
+		return
+	}
+
+	previous = strings.TrimSpace(previous)
+	if previous == "" {
+		return
+	}
+
+	for i, rec := range records {
+		if rec.SessionName != previous {
+			continue
+		}
+
+		if i == 0 {
+			return
+		}
+
+		prev := records[i]
+		copy(records[1:i+1], records[0:i])
+		records[0] = prev
+
+		return
+	}
 }
 
 func (a *App) SelectTargetWithTUI() (PickerTarget, error) {
