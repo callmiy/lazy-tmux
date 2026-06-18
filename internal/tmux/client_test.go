@@ -30,6 +30,48 @@ func TestSplitLines(t *testing.T) {
 	}
 }
 
+func TestPreviousSessionReturnsEmptyOutsideTmux(t *testing.T) {
+	t.Setenv("TMUX", "")
+
+	runner := &fakeRunner{}
+	client := NewClientWithRunner("tmux", runner)
+
+	got, err := client.PreviousSession()
+	if err != nil {
+		t.Fatalf("PreviousSession returned error: %v", err)
+	}
+
+	if got != "" {
+		t.Fatalf("expected empty previous session outside tmux, got %q", got)
+	}
+
+	if len(runner.commands) != 0 {
+		t.Fatalf("expected no tmux commands outside tmux, got %#v", runner.commands)
+	}
+}
+
+func TestPreviousSessionReadsClientLastSession(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-socket,1,0")
+
+	runner := &fakeRunner{
+		outputs: map[string]commandResult{
+			fmt.Sprint([]string{"tmux", "display-message", "-p", "#{client_last_session}"}): {
+				stdout: "previous\n",
+			},
+		},
+	}
+	client := NewClientWithRunner("tmux", runner)
+
+	got, err := client.PreviousSession()
+	if err != nil {
+		t.Fatalf("PreviousSession returned error: %v", err)
+	}
+
+	if got != "previous" {
+		t.Fatalf("expected previous session, got %q", got)
+	}
+}
+
 func TestIsShellCommand(t *testing.T) {
 	tests := []struct {
 		in   string

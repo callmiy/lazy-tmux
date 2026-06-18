@@ -156,6 +156,19 @@ func (client *Client) CurrentSession() (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+func (client *Client) PreviousSession() (string, error) {
+	if os.Getenv("TMUX") == "" {
+		return "", nil
+	}
+
+	out, err := client.Output("display-message", "-p", "#{client_last_session}")
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(out), nil
+}
+
 func (client *Client) SocketPath() string {
 	out, err := client.Output("display-message", "-p", "#{socket_path}")
 	if err != nil {
